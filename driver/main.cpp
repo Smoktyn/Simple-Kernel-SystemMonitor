@@ -8,6 +8,7 @@ void SysMonUnload(PDRIVER_OBJECT DriverObject);
 NTSTATUS SysMonCreateClose(PDEVICE_OBJECT DeviceObjct, PIRP Irp);
 NTSTATUS SysMonRead(PDEVICE_OBJECT DeviceObject, PIRP Irp);
 void OnProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO CreateInfo);
+void OnThreadNotify(HANDLE ProcessId, HANDLE ThreadId, BOOLEAN Create);
 void PushItem(LIST_ENTRY* entry);
 
 Globals g_Globals;
@@ -48,15 +49,20 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
 			break;
 		}
 		processCallback = true;
-
+		status = PsSetCreateThreadNotifyRoutine(OnThreadNotify);
+		if (!NT_SUCCESS(status)) {
+			KdPrint(("Create thread notify error  (0x%08X)\n", status));
+			break;
+		}
+		threadCallback = true;
 
 	} while (false);
 
 	if (!NT_SUCCESS(status)) {
 		if (threadCallback)
-			//PsRemoveCreateThreadNotifyRoutine(OnThreadNotify);
-			if (processCallback)
-				PsSetCreateProcessNotifyRoutineEx(OnProcessNotify, TRUE);
+			PsRemoveCreateThreadNotifyRoutine(OnThreadNotify);
+		if (processCallback)
+			PsSetCreateProcessNotifyRoutineEx(OnProcessNotify, TRUE);
 		if (symLinkCreated)
 			IoDeleteSymbolicLink(&symLink);
 		if (DeviceObject)
@@ -76,7 +82,7 @@ NTSTATUS SysMonCreateClose(PDEVICE_OBJECT DeviceObjct, PIRP Irp) {
 void SysMonUnload(PDRIVER_OBJECT DriverObject) {
 	UNICODE_STRING symLink = RTL_CONSTANT_STRING(L"\\??\\sysmon");
 	PsSetCreateProcessNotifyRoutineEx(OnProcessNotify, TRUE);
-	//PsRemoveCreateThreadNotifyRoutine(OnThreadNotify);
+	PsRemoveCreateThreadNotifyRoutine(OnThreadNotify);
 	IoDeleteSymbolicLink(&symLink);
 
 	IoDeleteDevice(DriverObject->DeviceObject);
@@ -142,6 +148,21 @@ void OnProcessNotify(PEPROCESS Process, HANDLE ProcessId, PPS_CREATE_NOTIFY_INFO
 		item.Size = sizeof(ProcessExitInfo);
 		PushItem(&info->Entry);
 	}
+}
+
+void OnThreadNotify(HANDLE ProcessId, HANDLE ThreadId, BOOLEAN Create) {
+	auto size = sizeof(FullItem<ThreadCreateExitInfo>);
+	auto info = (FullItem<ThreadCreateExitInfo>*)ExAllocatePoolWithTag(PagedPool, size, DRIVER_TAG);
+	if (info == nullptr) {
+		KdPrint(("Allocation failed\n"));
+	}
+	auto& item = info->Data;
+	KeQuerySystemTimePrecise(&item.Time);
+	item.Size = sizeof(item);
+	item.Type = Create ? ItemType::ThreadCreate : ItemType::ThreadExit;
+	item.ProcessId = HandleToULong(ProcessId);
+	item.ThreadId = HandleToULong(ThreadId);
+	PushItem(&info->Entry);
 }
 
 NTSTATUS SysMonRead(PDEVICE_OBJECT, PIRP Irp) {
